@@ -1,27 +1,69 @@
 name: Deploy to Minikube using GitHub Actions
 
 on: [push]
-  
+
 jobs:
   job1:
     runs-on: ubuntu-latest
     name: build Node.js Docker Image and deploy to minikube
     steps:
-    - uses: actions/checkout@v2 # Changed to v2, as v3/v4 are newer but v2 is in the example
+    - uses: actions/checkout@v2
     - name: Start minikube
       uses: medyagh/setup-minikube@master
-    - name: Try the cluster !
+    - name: Check kubectl version and cluster-info
+      run: |
+        kubectl version
+        kubectl cluster-info
+    - name: Try the cluster ! (Initial pod check)
       run: kubectl get pods -A
+
     - name: Build image
       run: |
           export SHELL=/bin/bash
           eval $(minikube -p minikube docker-env)
+          echo "INFO: Docker environment set for Minikube"
           docker build -f ./Dockerfile -t devopshint/node-app:latest .
-          echo -n "verifying images:"
-          docker images         
+          echo "INFO: Docker build command executed"
+          echo "INFO: Verifying images in Minikube's Docker daemon:"
+          docker images
+          # Ensure the image is listed above
+
     - name: Deploy to minikube
-      run: kubectl apply -f k8s-node-app.yaml
+      run: |
+        kubectl apply -f k8s-node-app.yaml
+        echo "INFO: kubectl apply executed. Waiting for deployment to be available..."
+        kubectl wait --for=condition=available deployment/nodejs-app --timeout=120s || echo "WARN: Deployment not fully available after 120s"
+
+    - name: Check deployment status
+      run: |
+        echo "INFO: Describing deployment nodejs-app:"
+        kubectl describe deployment nodejs-app
+        echo "INFO: Getting pods for app=nodejs-app:"
+        kubectl get pods -l app=nodejs-app -o wide
+        echo "INFO: Describing pods for app=nodejs-app (if any exist):"
+        # This loop will describe each pod if they exist
+        for pod in $(kubectl get pods -l app=nodejs-app -o jsonpath='{.items[*].metadata.name}'); do
+          echo "--- Describing pod $pod ---"
+          kubectl describe pod $pod
+          echo "--- Logs for pod $pod ---"
+          kubectl logs $pod --tail=50 # Get last 50 lines of logs
+        done
+        echo "INFO: Getting all pods in default namespace:"
+        kubectl get pods -n default -o wide
+
+    - name: Check service and endpoints
+      run: |
+        echo "INFO: Getting service nodejs-app:"
+        kubectl get svc nodejs-app
+        echo "INFO: Describing service nodejs-app:"
+        kubectl describe svc nodejs-app # This will show if it has Endpoints
+
+    - name: Add a small delay before testing service URL
+      run: sleep 15 # Give a little more time for endpoints to be fully registered
+
     - name: Test service URLs
       run: |
+          echo "INFO: Listing all Minikube services:"
           minikube service list
-          minikube service nodejs-app --url
+          echo "INFO: Attempting to get URL for nodejs-app service:"
+          minikube service nodejs-app --url || echo "ERROR: minikube service nodejs-app --url failed. See previous logs for pod/deployment status."
